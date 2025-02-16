@@ -35,7 +35,7 @@ use std::fs::File;
 use utils::epoll::{ControlOperation, EpollEvent};
 
 use std::{
-    io::{self, Read, Seek, SeekFrom},
+    io::{self, Seek, SeekFrom},
     os::unix::io::AsRawFd,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -43,7 +43,7 @@ use std::{
     },
 };
 use utils::eventfd::EventFd;
-use vm_memory::{Bytes, GuestAddress};
+use vm_memory::{GuestAddress, GuestMemory, ReadVolatile};
 use vm_superio::serial;
 
 /// Errors associated with starting the instance.
@@ -147,7 +147,7 @@ fn load_initrd<F>(
     image: &mut F,
 ) -> std::result::Result<InitrdConfig, StartVmError>
 where
-    F: Read + Seek,
+    F: ReadVolatile + Seek,
 {
     let size: usize;
     // Get image size
@@ -170,11 +170,12 @@ where
         arch::x86_64::initrd_load_addr(vm_memory, size).map_err(|_| StartVmError::InitrdLoad)?;
 
     // Load the image into memory
-    //   - read_from is defined as trait methods of Bytes<A>
-    //     and GuestMemoryMmap implements this trait.
-    // TODO: Explain arch::initrd_load_addr's return address is used in read_from ?
-    vm_memory
-        .read_from(GuestAddress(address), image, size)
+    let mut slice = vm_memory
+        .get_slice(GuestAddress(address), size)
+        .map_err(|_| StartVmError::InitrdLoad)?;
+
+    image
+        .read_exact_volatile(&mut slice)
         .map_err(|_| StartVmError::InitrdLoad)?;
 
     Ok(InitrdConfig {
@@ -346,7 +347,7 @@ fn run_vcpus(
 ) -> Result<(), StartVmError> {
     let kill_signaled = Arc::new(AtomicBool::new(false));
 
-    for (vcpu_id, vcpu) in vcpus.drain(..).enumerate() {
+    for (vcpu_id, mut vcpu) in vcpus.drain(..).enumerate() {
         let pio_bus = vmm.pio_device_manager.io_bus.clone();
         let mmio_bus = vmm.mmio_device_manager.bus.clone();
         let kill_signaled = kill_signaled.clone();

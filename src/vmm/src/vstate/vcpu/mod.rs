@@ -140,7 +140,7 @@ impl Vcpu {
             .map_err(VcpuError::VcpuSetRegs)
     }
 
-    pub fn run(&self) -> Result<VcpuExit, VcpuError> {
+    pub fn run(&mut self) -> Result<VcpuExit, VcpuError> {
         self.kvm_vcpu.fd.run().map_err(VcpuError::VcpuRun)
     }
 

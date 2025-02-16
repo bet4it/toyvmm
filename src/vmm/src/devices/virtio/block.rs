@@ -24,7 +24,7 @@ use std::{
     os::unix::io::AsRawFd,
 };
 use utils::{epoll, eventfd::EventFd};
-use vm_memory::{Bytes, GuestAddress, GuestMemory, GuestMemoryError};
+use vm_memory::{Bytes, GuestAddress, GuestMemory, GuestMemoryError, ReadVolatile, WriteVolatile};
 
 const SECTOR_SHIFT: u8 = 9; // 512 = 2^9
 const SECTOR_SIZE: u64 = 0x01 << SECTOR_SHIFT;
@@ -224,17 +224,18 @@ impl Request {
         disk: &mut T,
         mem: &GuestMemoryMmap,
         disk_id: &Vec<u8>,
-    ) -> std::result::Result<u32, BlockExecuteError> {
+    ) -> std::result::Result<u32, BlockExecuteError> 
+    where T: ReadVolatile + WriteVolatile {
         disk.seek(SeekFrom::Start(self.sector << SECTOR_SHIFT))
             .map_err(BlockExecuteError::Seek)?;
         match self.request_type {
             BlockRequestType::In => {
-                mem.read_from(self.data_addr, disk, self.data_len as usize)
+                mem.read_volatile_from(self.data_addr, disk, self.data_len as usize)
                     .map_err(BlockExecuteError::Read)?;
                 return Ok(self.data_len);
             }
             BlockRequestType::Out => {
-                mem.write_to(self.data_addr, disk, self.data_len as usize)
+                mem.write_volatile_to(self.data_addr, disk, self.data_len as usize)
                     .map_err(BlockExecuteError::Write)?;
             }
             BlockRequestType::Flush => disk.flush().map_err(BlockExecuteError::Flush)?,
