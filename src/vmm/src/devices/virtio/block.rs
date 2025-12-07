@@ -224,8 +224,10 @@ impl Request {
         disk: &mut T,
         mem: &GuestMemoryMmap,
         disk_id: &Vec<u8>,
-    ) -> std::result::Result<u32, BlockExecuteError> 
-    where T: ReadVolatile + WriteVolatile {
+    ) -> std::result::Result<u32, BlockExecuteError>
+    where
+        T: ReadVolatile + WriteVolatile,
+    {
         disk.seek(SeekFrom::Start(self.sector << SECTOR_SHIFT))
             .map_err(BlockExecuteError::Seek)?;
         match self.request_type {

@@ -14,6 +14,10 @@ pub mod builder;
 pub mod cpu;
 pub mod device_manager;
 pub mod devices;
+#[cfg(feature = "gdb")]
+pub mod gdb;
+#[cfg(feature = "gdb")]
+pub mod logger;
 pub mod resources;
 pub mod utils;
 pub mod vmm_config;

@@ -46,6 +46,13 @@ use utils::eventfd::EventFd;
 use vm_memory::{GuestAddress, GuestMemory, ReadVolatile};
 use vm_superio::serial;
 
+#[cfg(feature = "gdb")]
+use crate::gdb;
+#[cfg(feature = "gdb")]
+use crate::gdb::target::get_raw_tid;
+#[cfg(feature = "gdb")]
+use std::sync::mpsc;
+
 /// Errors associated with starting the instance.
 #[derive(Debug, thiserror::Error)]
 pub enum StartVmError {
@@ -91,6 +98,14 @@ pub enum StartVmError {
     RegisterMmioDevice(MmioDeviceError),
     #[error("Cannot initialize a epoll context for mmio device: {0}")]
     EpollCtx(epoll::EpollContextError),
+    /// Error starting GDB debug session
+    #[cfg(feature = "gdb")]
+    #[error("Failed to start GDB debug session")]
+    GdbServer(gdb::target::GdbTargetError),
+    /// Error cloning Vcpu fds
+    #[cfg(feature = "gdb")]
+    #[error("Failed to clone Vcpu fds: {0}")]
+    VcpuFdCloneError(#[from] crate::vstate::vcpu::CopyKvmFdError),
 }
 
 pub struct InitrdConfig {
@@ -122,7 +137,7 @@ fn load_kernel(
     vm_resources: &mut resources::VmResources,
     guest_memory: &memory::GuestMemoryMmap,
 ) -> Result<GuestAddress, StartVmError> {
-    let kernel_entry_addr = Loader::load::<File, memory::GuestMemoryMmap>(
+    let kernel_entry_addr = Loader::load(
         guest_memory,
         None,
         &mut vm_resources.boot_config_mut().kernel_file,
@@ -383,6 +398,16 @@ fn run_vcpus(
                                 VcpuExit::Shutdown => {
                                     break;
                                 }
+                                #[cfg(feature = "gdb")]
+                                VcpuExit::Debug(_) => {
+                                    if let Some(gdb_event) = &vcpu.gdb_event {
+                                        let (reply_tx, reply_rx) = mpsc::channel();
+                                        gdb_event
+                                            .send((get_raw_tid(vcpu_id), reply_tx))
+                                            .expect("Unable to notify gdb event");
+                                        reply_rx.recv().unwrap();
+                                    }
+                                }
                                 _ => {
                                     println!("unexpected exit reason");
                                     break;
@@ -518,6 +543,18 @@ pub fn build_and_boot_vm(mut vm_resources: resources::VmResources) -> Result<(),
         &vcpu_exit_evt,
     )?;
 
+    #[cfg(feature = "gdb")]
+    let (gdb_tx, gdb_rx) = mpsc::channel();
+    #[cfg(feature = "gdb")]
+    vcpus
+        .iter_mut()
+        .for_each(|vcpu| vcpu.attach_debug_info(gdb_tx.clone()));
+    #[cfg(feature = "gdb")]
+    let vcpu_fds = vcpus
+        .iter()
+        .map(|vcpu| vcpu.copy_kvm_vcpu_fd(&vmm.vm))
+        .collect::<Result<Vec<_>, _>>()?;
+
     let mut epoll_context =
         epoll::EpollContext::new(vcpu_exit_evt.as_raw_fd()).map_err(EpollCtx)?;
     attach_block_devices(
@@ -525,17 +562,27 @@ pub fn build_and_boot_vm(mut vm_resources: resources::VmResources) -> Result<(),
         &mut epoll_context,
         &mut vmm.mmio_device_manager,
     )?;
-    attach_net_devices(
-        &mut vm_resources,
-        &mut epoll_context,
-        &mut vmm.mmio_device_manager,
-    )?;
+    // attach_net_devices(
+    //     &mut vm_resources,
+    //     &mut epoll_context,
+    //     &mut vmm.mmio_device_manager,
+    // )?;
     vmm.mmio_device_manager
         .setup_event_notifier(&vmm.vm)
         .map_err(VmmError::MmioNotifier)
         .map_err(StartVmError::Internal)?;
 
     configure_system_for_boot(&vmm, &mut vcpus, &vm_resources, entry_addr, &initrd)?;
+
+    #[cfg(feature = "gdb")]
+    gdb::gdb_thread(
+        vmm.guest_memory.clone(),
+        vcpu_fds,
+        gdb_rx,
+        entry_addr,
+        "/tmp/gdb.sock",
+    )
+    .map_err(GdbServer)?;
 
     // Run vCpu / Stdio Thread
     let vcpu_count = vcpus.len();

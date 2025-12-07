@@ -16,3 +16,7 @@ thiserror = "2"
 
 vmm = { path = "../vmm" }
 utils = { path = "../utils" }
+
+[features]
+default = []
+gdb = ["vmm/gdb"]

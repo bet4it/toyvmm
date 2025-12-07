@@ -57,7 +57,7 @@ impl From<kvm_bindings::CpuId> for AmdCpuid {
 
 impl AmdCpuid {
     /// We always use this brand string.
-    const DEFAULT_BRAND_STRING: &[u8; BRAND_STRING_LENGTH] =
+    const DEFAULT_BRAND_STRING: &'static [u8; BRAND_STRING_LENGTH] =
         b"AMD EPYC\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
     pub fn normalize(
