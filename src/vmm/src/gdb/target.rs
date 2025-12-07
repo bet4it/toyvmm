@@ -227,18 +227,21 @@ impl FirecrackerTarget {
     /// Resumes execution of all paused Vcpus, update them with current kvm debug info
     /// and resumes
     fn resume_all_vcpus(&mut self) -> Result<(), GdbTargetError> {
+        println!("Enter resume_all_vcpus");
         let sender = self.sender.take();
         self.vcpu_state
             .iter()
             .try_for_each(|state| state.update_kvm_debug(&self.hw_breakpoints))?;
 
-        for cpu_id in 0..self.vcpu_state.len() {
-            let tid = vcpuid_to_tid(cpu_id)?;
-            self.resume_vcpu(tid)?;
-        }
+        // for cpu_id in 0..self.vcpu_state.len() {
+        //     let tid = vcpuid_to_tid(cpu_id)?;
+        //     self.resume_vcpu(tid)?;
+        // }
 
         self.paused_vcpu = None;
+        println!("  Before send");
         sender.unwrap().send(()).unwrap();
+        println!("  After send");
 
         Ok(())
     }
@@ -303,6 +306,10 @@ impl FirecrackerTarget {
         // }
 
         // vcpu_state.paused = false;
+        println!("Enter resume_vcpu!!!!!!!!!!");
+        let sender = self.sender.take();
+        sender.unwrap().send(()).unwrap();
+        // self.resume_all_vcpus()
         Ok(())
     }
 
@@ -340,7 +347,10 @@ impl FirecrackerTarget {
         }
 
         // This is not a breakpoint we've set, likely one set by the guest
-        Ok(None)
+        Ok(Some(MultiThreadStopReason::SignalWithThread {
+            tid,
+            signal: Signal::SIGTRAP,
+        }))
     }
 }
 
@@ -483,6 +493,7 @@ impl MultiThreadResume for FirecrackerTarget {
         tid: Tid,
         _signal: Option<Signal>,
     ) -> Result<(), Self::Error> {
+        println!("Enter set_resume_action_continue");
         self.vcpu_state[tid_to_vcpuid(tid)].single_step = false;
 
         Ok(())
@@ -513,6 +524,7 @@ impl MultiThreadSingleStep for FirecrackerTarget {
         tid: Tid,
         _signal: Option<Signal>,
     ) -> Result<(), Self::Error> {
+        println!("Enter set_resume_action_step");
         self.vcpu_state[tid_to_vcpuid(tid)].single_step = true;
 
         Ok(())

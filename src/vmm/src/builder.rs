@@ -399,13 +399,16 @@ fn run_vcpus(
                                     break;
                                 }
                                 #[cfg(feature = "gdb")]
-                                VcpuExit::Debug(_) => {
+                                VcpuExit::Debug(reason) => {
+                                    println!("Enter Debug {:x} {}", reason.pc, reason.exception);
                                     if let Some(gdb_event) = &vcpu.gdb_event {
                                         let (reply_tx, reply_rx) = mpsc::channel();
                                         gdb_event
                                             .send((get_raw_tid(vcpu_id), reply_tx))
                                             .expect("Unable to notify gdb event");
+                                        println!("  Before recv");
                                         reply_rx.recv().unwrap();
+                                        println!("  After recv");
                                     }
                                 }
                                 _ => {

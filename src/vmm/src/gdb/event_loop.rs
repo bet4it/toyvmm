@@ -35,6 +35,7 @@ pub fn event_loop(
         .recv()
         .expect("Error getting initial gdb event");
     target.sender = Some(sender);
+    println!("Set sender in event_loop");
 
     gdb_event_loop_thread(debugger, target);
 }
@@ -66,6 +67,7 @@ impl run_blocking::BlockingEventLoop for GdbBlockingEventLoop {
                     // If notify paused returns false this means we were already debugging a single
                     // core, the target will track this for us to pick up later
                     target.set_paused_vcpu(tid);
+                    target.sender = Some(sender);
                     trace!("Vcpu: {tid:?} paused from debug exit");
 
                     let stop_reason = target
@@ -88,7 +90,7 @@ impl run_blocking::BlockingEventLoop for GdbBlockingEventLoop {
                     };
 
                     trace!("Returned stop reason to gdb: {stop_response:?}");
-                    target.sender = Some(sender);
+                    println!("Set sender in wait_for_stop_reason");
                     return Ok(run_blocking::Event::TargetStopped(stop_response));
                 }
                 Err(Empty) => (),

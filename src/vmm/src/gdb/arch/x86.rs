@@ -62,7 +62,9 @@ fn set_kvm_debug(
 
     dbg.arch.debugreg[7] = X86_GLOBAL_DEBUG_ENABLE;
 
+    println!("Enter set_kvm_debug");
     for (i, addr) in addrs.iter().enumerate() {
+        println!("Bp addr {:x}", addr.0);
         dbg.arch.debugreg[i] = addr.0;
         // Set global breakpoint enable flag for the specific breakpoint number by setting the bit
         dbg.arch.debugreg[7] |= 2 << (i * 2);
@@ -79,6 +81,7 @@ pub fn vcpu_set_debug(
     addrs: &[GuestAddress],
     step: bool,
 ) -> Result<(), GdbTargetError> {
+    println!("Enter vcpu_set_debug");
     let mut control = KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_HW_BP | KVM_GUESTDBG_USE_SW_BP;
     if step {
         control |= KVM_GUESTDBG_SINGLESTEP;
@@ -94,6 +97,7 @@ pub fn vcpu_inject_bp(
     addrs: &[GuestAddress],
     step: bool,
 ) -> Result<(), GdbTargetError> {
+    println!("Enter vcpu_inject_bp");
     let mut control = KVM_GUESTDBG_ENABLE
         | KVM_GUESTDBG_USE_HW_BP
         | KVM_GUESTDBG_USE_SW_BP
