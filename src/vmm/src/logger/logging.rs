@@ -1,0 +1,260 @@
+// Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use std::fmt::Debug;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::SystemTime;
+
+use log::{Log, Metadata, Record};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Default level filter for logger matching the swagger specification
+/// (`src/firecracker/swagger/firecracker.yaml`).
+pub const DEFAULT_LEVEL: log::LevelFilter = log::LevelFilter::Info;
+/// Default instance id.
+pub const DEFAULT_INSTANCE_ID: &str = "anonymous-instance";
+/// Instance id.
+pub static INSTANCE_ID: OnceLock<String> = OnceLock::new();
+
+/// The logger.
+///
+/// Default values matching the swagger specification (`src/firecracker/swagger/firecracker.yaml`).
+pub static LOGGER: Logger = Logger(Mutex::new(LoggerConfiguration {
+    target: None,
+    filter: LogFilter { module: None },
+    format: LogFormat {
+        show_level: false,
+        show_log_origin: false,
+    },
+}));
+
+/// Error type for [`Logger::init`].
+pub type LoggerInitError = log::SetLoggerError;
+
+/// Error type for [`Logger::update`].
+#[derive(Debug, thiserror::Error)]
+#[error("Failed to open target file: {0}")]
+pub struct LoggerUpdateError(pub std::io::Error);
+
+impl Logger {
+    /// Initialize the logger.
+    pub fn init(&'static self) -> Result<(), LoggerInitError> {
+        log::set_logger(self)?;
+        log::set_max_level(DEFAULT_LEVEL);
+        Ok(())
+    }
+
+    /// Applies the given logger configuration the logger.
+    pub fn update(&self, config: LoggerConfig) -> Result<(), LoggerUpdateError> {
+        let mut guard = self.0.lock().unwrap();
+        log::set_max_level(
+            config
+                .level
+                .map(log::LevelFilter::from)
+                .unwrap_or(DEFAULT_LEVEL),
+        );
+
+        if let Some(log_path) = config.log_path {
+            let file = std::fs::OpenOptions::new()
+                .custom_flags(libc::O_NONBLOCK)
+                .read(true)
+                .write(true)
+                .open(log_path)
+                .map_err(LoggerUpdateError)?;
+
+            guard.target = Some(file);
+        };
+
+        if let Some(show_level) = config.show_level {
+            guard.format.show_level = show_level;
+        }
+
+        if let Some(show_log_origin) = config.show_log_origin {
+            guard.format.show_log_origin = show_log_origin;
+        }
+
+        if let Some(module) = config.module {
+            guard.filter.module = Some(module);
+        }
+
+        // Ensure we drop the guard before attempting to log, otherwise this
+        // would deadlock.
+        drop(guard);
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct LogFilter {
+    pub module: Option<String>,
+}
+#[derive(Debug)]
+pub struct LogFormat {
+    pub show_level: bool,
+    pub show_log_origin: bool,
+}
+#[derive(Debug)]
+pub struct LoggerConfiguration {
+    pub target: Option<std::fs::File>,
+    pub filter: LogFilter,
+    pub format: LogFormat,
+}
+#[derive(Debug)]
+pub struct Logger(pub Mutex<LoggerConfiguration>);
+
+impl Log for Logger {
+    // No additional filters to <https://docs.rs/log/latest/log/fn.max_level.html>.
+    fn enabled(&self, _metadata: &Metadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &Record) {
+        // Lock the logger.
+        let mut guard = self.0.lock().unwrap();
+
+        // Check if the log message is enabled
+        {
+            let enabled_module = match (&guard.filter.module, record.module_path()) {
+                (Some(filter), Some(source)) => source.starts_with(filter),
+                (Some(_), None) => false,
+                (None, _) => true,
+            };
+            let enabled = enabled_module;
+            if !enabled {
+                return;
+            }
+        }
+
+        // Prints log message
+        {
+            let thread = thread::current().name().unwrap_or("-").to_string();
+            let level = match guard.format.show_level {
+                true => format!(":{}", record.level()),
+                false => String::new(),
+            };
+
+            let origin = match guard.format.show_log_origin {
+                true => {
+                    let file = record.file().unwrap_or("?");
+                    let line = match record.line() {
+                        Some(x) => x.to_string(),
+                        None => String::from("?"),
+                    };
+                    format!(":{file}:{line}")
+                }
+                false => String::new(),
+            };
+
+            let message = format!(
+                "{:?} [{}:{thread}{level}{origin}] {}\n",
+                SystemTime::now(),
+                INSTANCE_ID
+                    .get()
+                    .map(|s| s.as_str())
+                    .unwrap_or(DEFAULT_INSTANCE_ID),
+                record.args()
+            );
+
+            let _ = if let Some(file) = &mut guard.target {
+                file.write_all(message.as_bytes())
+            } else {
+                std::io::stdout().write_all(message.as_bytes())
+            };
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// Strongly typed structure used to describe the logger.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoggerConfig {
+    /// Named pipe or file used as output for logs.
+    pub log_path: Option<PathBuf>,
+    /// The level of the Logger.
+    pub level: Option<LevelFilter>,
+    /// Whether to show the log level in the log.
+    pub show_level: Option<bool>,
+    /// Whether to show the log origin in the log.
+    pub show_log_origin: Option<bool>,
+    /// The module to filter logs by.
+    pub module: Option<String>,
+}
+
+/// This is required since we originally supported `Warning` and uppercase variants being used as
+/// the log level filter. It would be a breaking change to no longer support this. In the next
+/// breaking release this should be removed (replaced with `log::LevelFilter` and only supporting
+/// its default deserialization).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum LevelFilter {
+    /// [`log::LevelFilter::Off`]
+    Off,
+    /// [`log::LevelFilter::Trace`]
+    Trace,
+    /// [`log::LevelFilter::Debug`]
+    Debug,
+    /// [`log::LevelFilter::Info`]
+    Info,
+    /// [`log::LevelFilter::Warn`]
+    Warn,
+    /// [`log::LevelFilter::Error`]
+    Error,
+}
+impl From<LevelFilter> for log::LevelFilter {
+    fn from(filter: LevelFilter) -> log::LevelFilter {
+        match filter {
+            LevelFilter::Off => log::LevelFilter::Off,
+            LevelFilter::Trace => log::LevelFilter::Trace,
+            LevelFilter::Debug => log::LevelFilter::Debug,
+            LevelFilter::Info => log::LevelFilter::Info,
+            LevelFilter::Warn => log::LevelFilter::Warn,
+            LevelFilter::Error => log::LevelFilter::Error,
+        }
+    }
+}
+impl<'de> Deserialize<'de> for LevelFilter {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let key = String::deserialize(deserializer)?;
+        let level = match key.to_lowercase().as_str() {
+            "off" => Ok(LevelFilter::Off),
+            "trace" => Ok(LevelFilter::Trace),
+            "debug" => Ok(LevelFilter::Debug),
+            "info" => Ok(LevelFilter::Info),
+            "warn" | "warning" => Ok(LevelFilter::Warn),
+            "error" => Ok(LevelFilter::Error),
+            _ => Err(D::Error::custom("Invalid LevelFilter")),
+        };
+        level
+    }
+}
+
+/// Error type for [`<LevelFilter as FromStr>::from_str`].
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("Failed to parse string to level filter: {0}")]
+pub struct LevelFilterFromStrError(String);
+
+impl FromStr for LevelFilter {
+    type Err = LevelFilterFromStrError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "off" => Ok(Self::Off),
+            "trace" => Ok(Self::Trace),
+            "debug" => Ok(Self::Debug),
+            "info" => Ok(Self::Info),
+            "warn" | "warning" => Ok(Self::Warn),
+            "error" => Ok(Self::Error),
+            _ => Err(LevelFilterFromStrError(String::from(s))),
+        }
+    }
+}

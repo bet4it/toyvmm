@@ -35,7 +35,7 @@ use std::fs::File;
 use utils::epoll::{ControlOperation, EpollEvent};
 
 use std::{
-    io::{self, Read, Seek, SeekFrom},
+    io::{self, Seek, SeekFrom},
     os::unix::io::AsRawFd,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -43,8 +43,15 @@ use std::{
     },
 };
 use utils::eventfd::EventFd;
-use vm_memory::{Bytes, GuestAddress};
+use vm_memory::{GuestAddress, GuestMemory, ReadVolatile};
 use vm_superio::serial;
+
+#[cfg(feature = "gdb")]
+use crate::gdb;
+#[cfg(feature = "gdb")]
+use crate::gdb::target::get_raw_tid;
+#[cfg(feature = "gdb")]
+use std::sync::mpsc;
 
 /// Errors associated with starting the instance.
 #[derive(Debug, thiserror::Error)]
@@ -98,6 +105,14 @@ pub enum StartVmError {
     /// Could not dispatch feature gate controller
     #[error("Could not dispatch feature gate controiller: {0}")]
     DispathFeatureGate(resources::ResourcesError),
+    /// Error starting GDB debug session
+    #[cfg(feature = "gdb")]
+    #[error("Failed to start GDB debug session")]
+    GdbServer(gdb::target::GdbTargetError),
+    /// Error cloning Vcpu fds
+    #[cfg(feature = "gdb")]
+    #[error("Failed to clone Vcpu fds: {0}")]
+    VcpuFdCloneError(#[from] crate::vstate::vcpu::CopyKvmFdError),
 }
 
 pub struct InitrdConfig {
@@ -129,7 +144,7 @@ fn load_kernel(
     vm_resources: &mut resources::VmResources,
     guest_memory: &memory::GuestMemoryMmap,
 ) -> Result<GuestAddress, StartVmError> {
-    let kernel_entry_addr = Loader::load::<File, memory::GuestMemoryMmap>(
+    let kernel_entry_addr = Loader::load(
         guest_memory,
         None,
         &mut vm_resources.boot_config_mut().kernel_file,
@@ -154,7 +169,7 @@ fn load_initrd<F>(
     image: &mut F,
 ) -> std::result::Result<InitrdConfig, StartVmError>
 where
-    F: Read + Seek,
+    F: ReadVolatile + Seek,
 {
     let size: usize;
     // Get image size
@@ -177,11 +192,12 @@ where
         arch::x86_64::initrd_load_addr(vm_memory, size).map_err(|_| StartVmError::InitrdLoad)?;
 
     // Load the image into memory
-    //   - read_from is defined as trait methods of Bytes<A>
-    //     and GuestMemoryMmap implements this trait.
-    // TODO: Explain arch::initrd_load_addr's return address is used in read_from ?
-    vm_memory
-        .read_from(GuestAddress(address), image, size)
+    let mut slice = vm_memory
+        .get_slice(GuestAddress(address), size)
+        .map_err(|_| StartVmError::InitrdLoad)?;
+
+    image
+        .read_exact_volatile(&mut slice)
         .map_err(|_| StartVmError::InitrdLoad)?;
 
     Ok(InitrdConfig {
@@ -364,7 +380,7 @@ fn run_vcpus(
 ) -> Result<(), StartVmError> {
     let kill_signaled = Arc::new(AtomicBool::new(false));
 
-    for (vcpu_id, vcpu) in vcpus.drain(..).enumerate() {
+    for (vcpu_id, mut vcpu) in vcpus.drain(..).enumerate() {
         let pio_bus = vmm.pio_device_manager.io_bus.clone();
         let mmio_bus = vmm.mmio_device_manager.bus.clone();
         let kill_signaled = kill_signaled.clone();
@@ -399,6 +415,19 @@ fn run_vcpus(
                                 }
                                 VcpuExit::Shutdown => {
                                     break;
+                                }
+                                #[cfg(feature = "gdb")]
+                                VcpuExit::Debug(reason) => {
+                                    println!("Enter Debug {:x} {}", reason.pc, reason.exception);
+                                    if let Some(gdb_event) = &vcpu.gdb_event {
+                                        let (reply_tx, reply_rx) = mpsc::channel();
+                                        gdb_event
+                                            .send((get_raw_tid(vcpu_id), reply_tx))
+                                            .expect("Unable to notify gdb event");
+                                        println!("  Before recv");
+                                        reply_rx.recv().unwrap();
+                                        println!("  After recv");
+                                    }
                                 }
                                 _ => {
                                     println!("unexpected exit reason");
@@ -535,6 +564,18 @@ pub fn build_and_boot_vm(mut vm_resources: resources::VmResources) -> Result<(),
         &vcpu_exit_evt,
     )?;
 
+    #[cfg(feature = "gdb")]
+    let (gdb_tx, gdb_rx) = mpsc::channel();
+    #[cfg(feature = "gdb")]
+    vcpus
+        .iter_mut()
+        .for_each(|vcpu| vcpu.attach_debug_info(gdb_tx.clone()));
+    #[cfg(feature = "gdb")]
+    let vcpu_fds = vcpus
+        .iter()
+        .map(|vcpu| vcpu.copy_kvm_vcpu_fd(&vmm.vm))
+        .collect::<Result<Vec<_>, _>>()?;
+
     let mut epoll_context =
         epoll::EpollContext::new(vcpu_exit_evt.as_raw_fd()).map_err(EpollCtx)?;
 
@@ -552,18 +593,28 @@ pub fn build_and_boot_vm(mut vm_resources: resources::VmResources) -> Result<(),
         &mut vmm.mmio_device_manager,
         enable_acpi,
     )?;
-    attach_net_devices(
-        &mut vm_resources,
-        &mut epoll_context,
-        &mut vmm.mmio_device_manager,
-        enable_acpi,
-    )?;
+    //attach_net_devices(
+    //    &mut vm_resources,
+    //    &mut epoll_context,
+    //    &mut vmm.mmio_device_manager,
+    //    enable_acpi,
+    //)?;
     vmm.mmio_device_manager
         .setup_event_notifier(&vmm.vm)
         .map_err(VmmError::MmioNotifier)
         .map_err(StartVmError::Internal)?;
 
     configure_system_for_boot(&vmm, &mut vcpus, &vm_resources, entry_addr, &initrd)?;
+
+    #[cfg(feature = "gdb")]
+    gdb::gdb_thread(
+        vmm.guest_memory.clone(),
+        vcpu_fds,
+        gdb_rx,
+        entry_addr,
+        "/tmp/gdb.sock",
+    )
+    .map_err(GdbServer)?;
 
     // Run vCpu / Stdio Thread
     let vcpu_count = vcpus.len();

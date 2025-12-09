@@ -11,8 +11,12 @@ name = "toyvmm"
 bench = false
 
 [dependencies]
-clap = { version = "4.3.23", features = ["derive", "string"] }
-thiserror = "1.0.47"
+clap = { version = "4.5.29", features = ["derive", "string"] }
+thiserror = "2"
 
 vmm = { path = "../vmm" }
 utils = { path = "../utils" }
+
+[features]
+default = []
+gdb = ["vmm/gdb"]

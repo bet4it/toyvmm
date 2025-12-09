@@ -18,6 +18,7 @@ use crate::{
 use kvm_bindings::{kvm_regs, kvm_sregs};
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd};
 use std::os::unix::io::AsRawFd;
+use std::sync::mpsc::Sender;
 use utils::eventfd::EventFd;
 use vm_memory::{GuestAddress, MmapRegion};
 
@@ -60,6 +61,22 @@ pub enum VcpuError {
     KvmVcpuConfiguration(KvmVcpuConfigureError),
 }
 
+/// Error type for [`Vcpu::copy_kvm_vcpu_fd`].
+#[cfg(feature = "gdb")]
+#[derive(Debug, thiserror::Error)]
+#[error("Failed to clone kvm Vcpu fd: {0}")]
+pub enum CopyKvmFdError {
+    /// Error with libc dup of kvm Vcpu fd
+    DupError(#[from] std::io::Error),
+    /// Error creating the Vcpu from the duplicated Vcpu fd
+    CreateVcpuError(#[from] kvm_ioctls::Error),
+}
+
+/// Error type for [`VcpuHandle::send_event`].
+#[derive(Debug, derive_more::From, thiserror::Error)]
+#[error("Failed to signal vCPU: {0}")]
+pub struct VcpuSendEventError(pub vmm_sys_util::errno::Error);
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum VcpuEmulation {
     Handled,
@@ -78,13 +95,21 @@ pub struct Vcpu {
 
     /// File descriptor for vcpu to trigger exit event on vmm.
     pub exit_evt: EventFd,
+
+    #[cfg(feature = "gdb")]
+    pub gdb_event: Option<Sender<(usize, Sender<()>)>>,
 }
 
 impl Vcpu {
     pub fn new(index: u8, vm: &Vm, exit_evt: EventFd) -> Result<Self, VcpuError> {
         use x86_64::*;
         let kvm_vcpu = KvmVcpu::new(index, vm).map_err(VcpuError::VcpuFd)?;
-        Ok(Vcpu { kvm_vcpu, exit_evt })
+        Ok(Vcpu {
+            kvm_vcpu,
+            exit_evt,
+            #[cfg(feature = "gdb")]
+            gdb_event: None,
+        })
     }
 
     pub fn configure(
@@ -140,7 +165,25 @@ impl Vcpu {
             .map_err(VcpuError::VcpuSetRegs)
     }
 
-    pub fn run(&self) -> Result<VcpuExit, VcpuError> {
+    /// Attaches the fields required for debugging
+    #[cfg(feature = "gdb")]
+    pub fn attach_debug_info(&mut self, gdb_event: Sender<(usize, Sender<()>)>) {
+        self.gdb_event = Some(gdb_event);
+    }
+
+    /// Obtains a copy of the VcpuFd
+    #[cfg(feature = "gdb")]
+    pub fn copy_kvm_vcpu_fd(&self, vm: &Vm) -> Result<VcpuFd, CopyKvmFdError> {
+        // SAFETY: We own this fd so it is considered safe to clone
+        let r = unsafe { libc::dup(self.kvm_vcpu.fd.as_raw_fd()) };
+        if r < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: We assert this is a valid fd by checking the result from the dup
+        unsafe { Ok(vm.fd().create_vcpu_from_rawfd(r)?) }
+    }
+
+    pub fn run(&mut self) -> Result<VcpuExit, VcpuError> {
         self.kvm_vcpu.fd.run().map_err(VcpuError::VcpuRun)
     }
 

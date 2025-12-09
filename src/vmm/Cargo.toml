@@ -10,22 +10,29 @@ license = "MIT"
 bench = false
 
 [dependencies]
-libc = ">=0.2.80"
-scopeguard = "=0.3.3"
-kvm-bindings = { version = ">=0.5.0", features = ["fam-wrappers"] }
-kvm-ioctls = ">=0.11.0"
-vmm-sys-util = ">=0.9.0"
-vm-memory = { version = "= 0.11.0", features = ["backend-mmap", "backend-bitmap"] }
-linux-loader = "=0.9.0"
-serde = { version = "=1.0.136", features = ["derive"] }
-serde_json = "1.0.79"
-vm-superio = ">= 0.6.0"
-byteorder = "=1.2.1"
-nix = "0.9.0"
+arrayvec = { version = "0.7.6", optional = true }
+displaydoc = "0.2.5"
+libc = "0.2.169"
+scopeguard = "=1.2.0"
+kvm-bindings = { version = "0.11.0", features = ["fam-wrappers"] }
+kvm-ioctls = "0.20.0"
+vmm-sys-util = "0.12.1"
+vm-memory = { version = "=0.16.1", features = ["backend-mmap", "backend-bitmap"] }
+linux-loader = "0.13.0"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.138"
+vm-superio = "0.8.0"
+byteorder = "1.5.0"
+nix = "0.29.0"
+log = { version = "0.4.25", features = ["std", "serde"] }
+gdbstub = { version = "0.7.0" , optional = true }
+gdbstub_arch = { version = "0.3.0" , optional = true }
 
-thiserror = "1.0.47"
-derive_more = { version = "0.99.17", default-features = false, features = ["from", "display"] }
+thiserror = "2"
+derive_more = { version = "2", default-features = false, features = ["from", "display"] }
 
 utils = { path = "../utils" }
 zerocopy = { version = "0.8.24", features = ["alloc", "derive"] }
-displaydoc = "0.2.5"
+
+[features]
+gdb = ["arrayvec", "gdbstub", "gdbstub_arch"]

@@ -8,7 +8,7 @@
 use crate::arch::x86_64::layout::IRQ_MAX;
 use crate::arch_gen::x86::mpspec;
 use crate::vstate::memory;
-use std::{io, mem};
+use std::mem;
 use vm_memory::{Address, ByteValued, Bytes, GuestAddress, GuestMemory};
 
 // These `mpspec` wrapper types are only data, reading them from data is a safe initialization.
@@ -126,7 +126,7 @@ pub fn setup_mptable(mem: &memory::GuestMemoryMmap, num_cpus: u8) -> Result<(), 
         return Err(MptableError::AddressOverflow);
     }
 
-    mem.read_from(base_mp, &mut io::repeat(0), mp_size)
+    mem.write_slice(&vec![0; mp_size], base_mp)
         .map_err(|_| MptableError::Clear)?;
 
     // Setup mpf_intel struct and write it to the guest memory.
